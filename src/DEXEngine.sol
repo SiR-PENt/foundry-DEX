@@ -25,6 +25,7 @@ pragma solidity ^0.8.24;
 
 import {DEXToken} from "./DEXToken.sol";
 import {ERC20} from "solmate/tokens/ERC20.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {OracleLib} from "./lib/OracleLib.sol";
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
@@ -44,6 +45,7 @@ contract DEXEngine is ReentrancyGuard {
     error DEXEngine__ToleranceLevelBreached(); // this means the values are apart by a wide range
     error DEXEngine__MintFailed();
     error DEXEngine__PoolDoesNotExists();
+    error DEXEngine__NeedsMoreThanZeroLpTokens();
 
     struct Pool {
         uint256 baseTokenReserve; // how much is in the reserve of the first token
@@ -90,7 +92,13 @@ contract DEXEngine is ReentrancyGuard {
         _;
     }
 
-    constructor(
+    modifier moreThanZeroLpTokens(address baseToken) {
+        Pool storage pool = liquidityPoolInfo[baseToken][s_quoteToken];
+        if(pool.tokenBalanceOfLp[msg.sender] <= 0) revert DEXEngine__NeedsMoreThanZeroLpTokens();
+        _;
+    }
+
+    constructor( 
         address[] memory baseTokens,
         address[] memory baseTokenPriceFeedAddresses,
         address quoteToken,
@@ -134,9 +142,9 @@ contract DEXEngine is ReentrancyGuard {
         Pool storage pool = liquidityPoolInfo[baseToken][s_quoteToken];
         pool.baseTokenReserve += baseTokenAmount;
         pool.quoteTokenReserve += quoteTokenAmount;
-        uint256 poolBalance = getPoolValueInUsd(baseToken, s_quoteToken);
+        (,,uint256 poolBalance) = getPoolValuesInUsd(baseToken);
         uint256 amountOfTokensDepositedByLpInUsd = valueA + valueB;
-        pool.totalSupplyOfLpTokens = i_dexToken.totalSupply();
+        pool.totalSupplyOfLpTokens = i_dexToken.totalSupply(); // this will be in wei, right?
 
         if (pool.totalSupplyOfLpTokens == 0) {
             // mint dextoken for user and update the state
@@ -164,17 +172,29 @@ contract DEXEngine is ReentrancyGuard {
         }
     }
     /**
+     * @param baseToken it's already in usd value
+     * @param amount amount of lpTokens to burn 
      * @notice we want a situation where we want to check if the user has lp tokens
      * the user also gets an allocation proportional to his lp token
      * burns the user's lp token
      *
      */
 
-    function withdrawLiquidity() public nonReentrant {}
+    function withdrawLiquidity(address baseToken, uint256 amount) public moreThanZeroLpTokens(baseToken) nonReentrant {
+         Pool storage pool = liquidityPoolInfo[baseToken][s_quoteToken];
+        // convert the reserve tokens to dollar
+        (uint256 baseTokenReserveInUsd, uint256 quoteTokenReserveInUsd, uint256 totalPoolBalance) = getPoolValuesInUsd(baseToken);
+        pool.totalSupplyOfLpTokens = i_dexToken.totalSupply();
+        //  get the fraction of the users lptoken to the total
+        uint256 userLpTokensProportion = amount/ pool.totalSupplyOfLpTokens;
+        // send proportion of each token to the user and burn 
+        // update the lptoken of the user in the pool struct 
+        // after calculating the token amount in dollar to return to the lp, convert the amount back to how many token it is, dyg?
+    }
 
     // this will return in e18
-    function getUsdValueOfBaseTokenDonated(address token, uint256 amount) public view returns (uint256) {
-        AggregatorV3Interface priceFeed = AggregatorV3Interface(s_baseTokenPrice[token]); // get the priceFeed of the token via chainlink
+    function getUsdValueOfBaseTokenDonated(address baseToken, uint256 amount) public view returns (uint256) {
+        AggregatorV3Interface priceFeed = AggregatorV3Interface(s_baseTokenPrice[baseToken]); // get the priceFeed of the token via chainlink
         (, int256 price,,,) = priceFeed.staleCheckLatestRoundData();
         return ((uint256(price) * ADDITIONAL_FEED_PRECISION) * amount) / PRECISION;
     }
@@ -186,17 +206,23 @@ contract DEXEngine is ReentrancyGuard {
         return ((uint256(price) * ADDITIONAL_FEED_PRECISION) * amount) / PRECISION;
     }
 
-    function getPoolValueInUsd(address tokenA, address tokenB) public view returns (uint256) {
+    function getPoolValuesInUsd(address baseToken) public returns (uint256, uint256, uint256) {
+        Pool storage pool = liquidityPoolInfo[baseToken][s_quoteToken];
+        pool.totalSupplyOfLpTokens = i_dexToken.totalSupply();
         // Convert each reserve to USD using Chainlink price feeds
-        uint256 reserveAInUsd =
-            getUsdValueOfBaseTokenDonated(tokenA, liquidityPoolInfo[tokenA][tokenB].baseTokenReserve);
-        uint256 reserveBInUsd =
-            getUsdValueOfBaseTokenDonated(tokenB, liquidityPoolInfo[tokenA][tokenB].quoteTokenReserve);
+        uint256 baseTokenReserveInUsd =
+            getUsdValueOfBaseTokenDonated(baseToken, pool.baseTokenReserve);
+        uint256 quoteTokenReserveInUsd =
+            getUsdValueOfQuoteTokenDonated(pool.quoteTokenReserve);
 
         // Sum the USD values to get the total pool value
-        uint256 totalPoolValueInUsd = reserveAInUsd + reserveBInUsd;
-        return totalPoolValueInUsd;
+        uint256 totalPoolValueInUsd = baseTokenReserveInUsd + quoteTokenReserveInUsd;
+        return (baseTokenReserveInUsd, quoteTokenReserveInUsd, totalPoolValueInUsd);
     }
+    
+    function getPoolInfo(address baseToken) internal view {
+        Pool storage pool = liquidityPoolInfo[baseToken][s_quoteToken];
+    } 
 
     function getTotalSupplyOfLpTokensInAPool() public view returns (uint256) {}
 }
